@@ -27,7 +27,7 @@ use axum::{
         ws::{self, WebSocket},
     },
     response::Response,
-    routing::any,
+    routing::{any, get},
 };
 use serde::{Deserialize, Serialize};
 // use serde_json::Result;
@@ -46,11 +46,11 @@ struct AppState {
 
 #[tokio::main]
 async fn main() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3001")
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:80")
         .await
-        .expect("Could not bind to 127.0.0.1:3001");
+        .expect("Could not bind to 0.0.0.0:80");
     println!("Listening on {:?}", listener.local_addr().unwrap());
-
+    println!("Waiting for connection");
     let (tx, _) = broadcast::channel(69);
 
     let msgs = Vec::<Message>::from([Message {
@@ -66,8 +66,13 @@ async fn main() {
     let router = Router::new()
         .route("/ws-events", any(events_handler)) // client <-> server event communication
         .route("/ws-key", any(key_handler)) // client <-> server keystrokes communication
+        .route("/get-test", get(get_test_handler))
         .with_state(state);
     axum::serve(listener, router).await.unwrap()
+}
+
+async fn get_test_handler(state: State<AppState>) -> axum::response::Html<&'static str> {
+    axum::response::Html("<h1 style=\"text-align: center;\">GET test</h1>")
 }
 
 async fn events_handler(ws: WebSocketUpgrade, state: State<AppState>) -> Response {
@@ -75,7 +80,7 @@ async fn events_handler(ws: WebSocketUpgrade, state: State<AppState>) -> Respons
 }
 
 async fn key_handler(ws: WebSocketUpgrade, state: State<AppState>) -> Response {
-    ws.on_upgrade(|ws| ws_key_handler(ws, state))
+    ws.on_upgrade(|ws| ws_events_handler(ws, state))
 }
 
 /************\
