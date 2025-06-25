@@ -1,12 +1,8 @@
-name: cavalier trunk image build & push
+name: Trunk buildenv dockerimage
 
-# This workflow runs when any of the following occur:
-# - A push is made to a branch called `main` or `seed`
-# - A tag starting with "v" is created
-# - A pull request is created or updated
+# This workflow runs manually
 on:
-  push:
-    workflow_dispatch
+  workflow_dispatch
 env:
   IMAGE_NAME: cavalier-trunk
 #
