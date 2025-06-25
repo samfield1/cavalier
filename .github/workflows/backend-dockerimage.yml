@@ -1,4 +1,3 @@
-#
 name: backend docker image build & push
 
 # This workflow runs when any of the following occur:
