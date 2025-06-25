@@ -1,4 +1,4 @@
-FROM cavalier-trunk:latest AS builder
+FROM ghcr.io/samfield1/cavalier-trunk:latest AS builder
 
 WORKDIR /docker
 COPY . .
