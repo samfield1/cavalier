@@ -1,4 +1,4 @@
-name: frontend docker image build & push
+name: frontend dockerimage
 
 # This workflow runs when any of the following occur:
 # - A push is made to a branch called `main` or `seed`
