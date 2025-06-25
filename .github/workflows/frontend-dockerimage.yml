@@ -1,21 +1,18 @@
 name: Frontend dockerimage
 
 # This workflow runs when any of the following occur:
-# - A push is made to a branch called `main` or `seed`
+# - A push is made to a branch called `main`
 # - A tag starting with "v" is created
 # - A pull request is created or updated
 on:
   push:
     branches:
       - main
-      - seed
     tags:
       - v*
   pull_request:
-  # This creates an environment variable called `IMAGE_NAME ` with the value `ghtoken_product_demo`.
 env:
   IMAGE_NAME: cavalier-frontend
-#
 jobs:
   # This pushes the image to GitHub Packages.
   push:
@@ -23,16 +20,12 @@ jobs:
     permissions:
       packages: write
       contents: read
-      #
     steps:
       - uses: actions/checkout@v4
-
       - name: Build image
         run: docker build frontend/ --file frontend/Dockerfile --tag $IMAGE_NAME --label "runnumber=${GITHUB_RUN_ID}"
-
       - name: Log in to registry
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-        #
       - name: Push image
         run: |
           IMAGE_ID=ghcr.io/${{ github.repository_owner }}/$IMAGE_NAME
