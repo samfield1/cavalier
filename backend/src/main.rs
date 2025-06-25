@@ -46,9 +46,14 @@ struct AppState {
 
 #[tokio::main]
 async fn main() {
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:80")
+    #[cfg(not(debug_assertions))]
+    const BASE_URL: &'static str = "0.0.0.0:80";
+    #[cfg(debug_assertions)]
+    const BASE_URL: &'static str = "127.0.0.1:3000";
+
+    let listener = tokio::net::TcpListener::bind(BASE_URL)
         .await
-        .expect("Could not bind to 0.0.0.0:80");
+        .expect(format!("Could not bind to {BASE_URL}").as_str());
     println!("Listening on {:?}", listener.local_addr().unwrap());
     println!("Waiting for connection");
     let (tx, _) = broadcast::channel(69);
@@ -64,9 +69,9 @@ async fn main() {
     };
 
     let router = Router::new()
-        .route("/ws-events", any(events_handler)) // client <-> server event communication
-        .route("/ws-key", any(key_handler)) // client <-> server keystrokes communication
-        .route("/get-test", get(get_test_handler))
+        .route("/api/ws-events", any(events_handler)) // client <-> server event communication
+        .route("/api/ws-key", any(key_handler)) // client <-> server keystrokes communication
+        .route("/api/get-test", get(get_test_handler))
         .with_state(state);
     axum::serve(listener, router).await.unwrap()
 }

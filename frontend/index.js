@@ -21,7 +21,11 @@
  /* <!-- keystroke handler --> */ 
 /*************************************/
 const hostname = window.location.hostname;
-const ws_key = new WebSocket(`ws://${hostname}:3001/ws-key`);
+const isLocalhost = hostname.includes("localhost") || hostname === '127.0.0.1';
+const protocol = (isLocalhost) ? "ws" : "wss";
+const port = (isLocalhost) ? "3000" : "80";
+const uri_base = `${protocol}://${hostname}:${port}`
+const ws_key = new WebSocket(`${uri_base}/api/ws-key`);
 
 let prev_val = "";
 ws_key.onopen = () => {
@@ -96,7 +100,7 @@ let sendMessage = () => {
 /* <!-- event handling code --> */
 /********************************/
 
-const ws_events = new WebSocket(`ws://${hostname}:3001/ws-events`);
+const ws_events = new WebSocket(`${uri_base}/api/ws-events`);
 ws_events.onopen = (event) => {
     console.log("Events WebSocket Disconnected");
 }
