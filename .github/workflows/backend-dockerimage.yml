@@ -1,5 +1,5 @@
 #
-name: backend
+name: backend docker image build & push
 
 # This workflow runs when any of the following occur:
 # - A push is made to a branch called `main` or `seed`
