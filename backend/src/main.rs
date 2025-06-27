@@ -31,6 +31,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{any, get},
 };
+use bytes::{BufMut, BytesMut};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 // use serde_json::Result;
@@ -55,7 +56,7 @@ use tower_sessions::{Expiry, MemoryStore, Session, SessionManagerLayer, session}
 /// Timings will be added
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Message {
-    id: i64,
+    id: u32,
     text: String,
 }
 
@@ -68,7 +69,7 @@ struct AppState {
     key_tx: Sender<Keystroke>,
     event_tx: Sender<Event>,
     messages: Arc<Mutex<Vec<Message>>>,
-    session_to_message: Arc<RwLock<HashMap<session::Id, i64>>>,
+    session_to_message: Arc<RwLock<HashMap<session::Id, u32>>>,
     /* db connection */
 }
 
@@ -95,7 +96,7 @@ async fn main() {
     msgvec.reserve(10);
     let messages = Arc::new(Mutex::new(msgvec));
 
-    let mut session_to_message_map = HashMap::<session::Id, i64>::new();
+    let session_to_message_map = HashMap::<session::Id, u32>::new();
     let session_to_message = Arc::new(RwLock::new(session_to_message_map));
 
     let state = AppState {
@@ -133,12 +134,12 @@ async fn get_test_handler(_: State<AppState>) -> axum::response::Html<&'static s
 async fn msg_new_handler(State(state): State<AppState>, session: Session) -> impl IntoResponse {
     let msgs_ref = state.messages.clone();
     let event_tx = state.event_tx.clone();
-    let msg_id: i64;
+    let msg_id: u32;
     let new_msg: Message;
+    // add to global state vec
+    // inside scope to drop guard at end
     if let Ok(mut msgs) = msgs_ref.try_lock() {
-        // add to global state vec
-        // inside scope to drop guard at end
-        msg_id = (msgs.len() + 1) as i64;
+        msg_id = u32::try_from(msgs.len() + 1).expect("Message id u32 overflow!");
         new_msg = Message {
             id: msg_id,
             text: String::new(),
@@ -152,11 +153,28 @@ async fn msg_new_handler(State(state): State<AppState>, session: Session) -> imp
             .into_response();
     };
 
-    // add to global state vec
-    match session.insert("message_id", msg_id).await {
-        Ok(_) => {}
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())).into_response(),
+    // add to global session RwLock
+    match session.id() {
+        Some(session_id) => {
+            let session_to_message_ref = state.session_to_message.clone();
+            let mut session_to_message = (*session_to_message_ref).write().await;
+            session_to_message.insert(session_id, msg_id);
+        }
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json("Session must be set to make a new message"),
+            )
+                .into_response();
+        }
     }
+    // This is not used, because I need the message_id to update while the websocket threads are
+    // running. Therefore, the session is just assosciated with an Arc<RwLock<HashMap<>>> inside
+    // the global app state struct
+    // match session.insert("message_id", msg_id).await {
+    //     Ok(_) => {}
+    //     Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())).into_response(),
+    // }
 
     // transmit new message event
     let new_msg_event = Event::MessageNew(new_msg.clone());
@@ -213,12 +231,10 @@ async fn ws_events_handler(mut ws: WebSocket, State(state): State<AppState>) {
 /**********************************\
 * Client <-> Server Keystroke Code *
 \**********************************/
-// TODO: See this webside for how to split the websocket send/recv
-// https://github.com/tokio-rs/aaxum/blob/main/examples/websockets/src/main.rs
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Keystroke {
-    message_id: i64,
+    message_id: u32,
     key: char,
     /* time: std::time::Duration, */  //this will get added in when DB functionality is added
 }
@@ -233,14 +249,8 @@ async fn key_handler(ws: WebSocketUpgrade, state: State<AppState>, session: Sess
 /// Split websocket into send/recv and propogate to separate client -> server and server -> client
 /// functions
 async fn ws_key_handler(ws: WebSocket, state: State<AppState>, session: Session) {
-    let _ = state.key_tx.clone();
-    let _ = ws;
-    let (mut ws_tx, mut ws_rx) = ws.split();
+    let (ws_tx, ws_rx) = ws.split();
     let mut s2c_task = tokio::spawn(ws_s2c_task(ws_tx, state.clone(), session.clone()));
-    // TODO: look at this clone
-    // this clone could break the
-    // handlers and there is
-    // probably another way to do it
     let mut c2s_task = tokio::spawn(ws_c2s_task(ws_rx, state, session));
     tokio::select! {
         s2c_result = (&mut s2c_task) => {
@@ -263,8 +273,8 @@ async fn ws_key_handler(ws: WebSocket, state: State<AppState>, session: Session)
     * Server -> Client Code *
     \***********************/
 
-    /// broadcast keystokes
-    /// receive message update from the tokio tx
+    /// receive keystrokes from the key_rx
+    /// send keystrokes to all clients but the originator
     async fn ws_s2c_task(
         mut ws_tx: SplitSink<WebSocket, ws::Message>,
         State(state): State<AppState>,
@@ -272,16 +282,39 @@ async fn ws_key_handler(ws: WebSocket, state: State<AppState>, session: Session)
     ) {
         let mut rx = state.key_tx.subscribe();
         loop {
-            let msg_update = rx
-                .recv()
-                .await
-                .map_err(|e| {
-                    eprintln!("Receive error: {e}");
-                })
-                .unwrap();
-            let json = serde_json::to_string(&msg_update).unwrap();
-            let ws_msg = ws::Message::Binary(json.into());
-            ws_tx.send(ws_msg).await.unwrap();
+            match rx.recv().await {
+                Ok(keystroke) => {
+                    // don't broadcast if the keystroke came from this session
+                    let self_msg: bool;
+                    {
+                        let session_id = session
+                            .id()
+                            .expect("ws key_tx task started without session id");
+                        let session_to_message_ref = state.session_to_message.clone();
+                        let session_to_message = (*session_to_message_ref).read().await;
+                        self_msg = match session_to_message.get(&session_id) {
+                            Some(message_id) => *message_id == keystroke.message_id,
+                            None => false,
+                        }
+                    }
+                    if !self_msg {
+                        // build buffer.
+                        // first 4 bytes = little endian char/key
+                        // last 4 bytes = little endian message id
+                        let mut buffer = BytesMut::with_capacity(8);
+                        buffer.put_u32_le(keystroke.key as u32);
+                        buffer.put_u32_le(keystroke.message_id);
+                        let msg_bytes = buffer.freeze();
+                        let ws_msg = ws::Message::Binary(msg_bytes);
+                        if let Err(e) = ws_tx.send(ws_msg).await {
+                            eprintln!("Error sending ws_tx: {e}");
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error receiving key_rx: {e}");
+                }
+            }
         }
     }
 
@@ -289,8 +322,8 @@ async fn ws_key_handler(ws: WebSocket, state: State<AppState>, session: Session)
     * Client -> Server Code *
     \***********************/
 
-    /// capture keystrokes
-    /// send message updates down the tokio tx
+    /// receive keystrokes from the client
+    /// send keystrokes down the key_tx
     async fn ws_c2s_task(
         mut ws_rx: SplitStream<WebSocket>,
         State(state): State<AppState>,
@@ -300,13 +333,15 @@ async fn ws_key_handler(ws: WebSocket, state: State<AppState>, session: Session)
         while let Some(Ok(msg)) = ws_rx.next().await {
             if let ws::Message::Binary(body) = msg {
                 if body.len() == 4 {
+                    // interpret message
+                    // 4 bytes long, little endian keystroke/char
                     let key_bytes: [u8; 4] = body[0..4].try_into().unwrap();
                     let key_int: u32 = u32::from_le_bytes(key_bytes);
                     if let Some(key) = char::from_u32(key_int) {
                         let session_id = session.id().expect(
                             "Session is not set before client broadcasted keystrokes to server",
                         );
-                        let message_id: i64;
+                        let message_id: u32;
                         {
                             let session_to_message_ref = state.session_to_message.clone();
                             let session_to_message = (*session_to_message_ref).read().await;
