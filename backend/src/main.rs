@@ -20,18 +20,44 @@
 //!
 //!
 
+#![allow(unused_imports)] // remove when development is futher along
 use axum::{
-    Router,
+    Json, Router,
     extract::{
         State, WebSocketUpgrade,
         ws::{self, WebSocket},
     },
-    response::Response,
+    http::StatusCode,
+    response::{IntoResponse, Response},
     routing::{any, get},
 };
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 // use serde_json::Result;
-use tokio::sync::broadcast::{self, Receiver, Sender};
+use futures_util::{
+    sink::SinkExt,
+    stream::{SplitSink, SplitStream, StreamExt},
+};
+use std::collections::HashMap;
+use tokio::sync::{
+    RwLock,
+    broadcast::{self, Receiver, Sender},
+};
+use tokio::time::Duration;
+use tower_sessions::{Expiry, MemoryStore, Session, SessionManagerLayer, session};
+
+/***********************\
+* Global Structs, Enums *
+\***********************/
+
+/// A completed Message.
+/// The text contains all keystrokes, including backspace.
+/// Timings will be added
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct Message {
+    id: i64,
+    text: String,
+}
 
 /**********************\
 * Main, Routing, State *
@@ -39,8 +65,10 @@ use tokio::sync::broadcast::{self, Receiver, Sender};
 
 #[derive(Clone)]
 struct AppState {
-    ws_tx: Sender<MessageUpdate>,
-    messages: Vec<Message>,
+    key_tx: Sender<Keystroke>,
+    event_tx: Sender<Event>,
+    messages: Arc<Mutex<Vec<Message>>>,
+    session_to_message: Arc<RwLock<HashMap<session::Id, i64>>>,
     /* db connection */
 }
 
@@ -56,128 +84,247 @@ async fn main() {
         .expect(format!("Could not bind to {BASE_URL}").as_str());
     println!("Listening on {:?}", listener.local_addr().unwrap());
     println!("Waiting for connection");
-    let (tx, _) = broadcast::channel(69);
 
-    let msgs = Vec::<Message>::from([Message {
+    let (key_tx, _) = broadcast::channel(10_000); // Keystroke tx
+    let (event_tx, _) = broadcast::channel(10_000); // event tx
+
+    let mut msgvec = Vec::<Message>::from([Message {
         id: 0,
         text: String::from("Default starting message. Sneed's Feed and Seed."),
     }]);
+    msgvec.reserve(10);
+    let messages = Arc::new(Mutex::new(msgvec));
+
+    let mut session_to_message_map = HashMap::<session::Id, i64>::new();
+    let session_to_message = Arc::new(RwLock::new(session_to_message_map));
 
     let state = AppState {
-        ws_tx: tx,
-        messages: msgs,
+        key_tx,
+        event_tx,
+        messages,
+        session_to_message,
     };
 
+    let session_store = MemoryStore::default();
+    let session_layer = SessionManagerLayer::new(session_store)
+        .with_secure(false)
+        .with_expiry(Expiry::OnInactivity(time::Duration::seconds(10)));
+
     let router = Router::new()
-        .route("/api/ws-events", any(events_handler)) // client <-> server event communication
-        .route("/api/ws-key", any(key_handler)) // client <-> server keystrokes communication
-        .route("/api/get-test", get(get_test_handler))
+        .route("/api/ws/events", any(events_handler)) // client <-> server event communication
+        .route("/api/ws/key", any(key_handler)) // client <-> server keystrokes communication
+        .route("/api/msg/new", any(msg_new_handler)) // json API: writing new message
+        .route("/api/msg/get", get(msg_get_handler)) // json API: get existing messages
+        .route("/api/get-test", get(get_test_handler)) // test page to check if axum is working
+        .layer(session_layer)
         .with_state(state);
     axum::serve(listener, router).await.unwrap()
 }
 
-async fn get_test_handler(state: State<AppState>) -> axum::response::Html<&'static str> {
+async fn get_test_handler(_: State<AppState>) -> axum::response::Html<&'static str> {
     axum::response::Html("<h1 style=\"text-align: center;\">GET test</h1>")
 }
 
-async fn events_handler(ws: WebSocketUpgrade, state: State<AppState>) -> Response {
-    ws.on_upgrade(|ws| ws_events_handler(ws, state))
+/*******************\
+* Message JSON APIs *
+\*******************/
+
+#[axum::debug_handler]
+async fn msg_new_handler(State(state): State<AppState>, session: Session) -> impl IntoResponse {
+    let msgs_ref = state.messages.clone();
+    let event_tx = state.event_tx.clone();
+    let msg_id: i64;
+    let new_msg: Message;
+    if let Ok(mut msgs) = msgs_ref.try_lock() {
+        // add to global state vec
+        // inside scope to drop guard at end
+        msg_id = (msgs.len() + 1) as i64;
+        new_msg = Message {
+            id: msg_id,
+            text: String::new(),
+        };
+        (*msgs).push(new_msg.clone());
+    } else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json("Could not access messages, try again."),
+        )
+            .into_response();
+    };
+
+    // add to global state vec
+    match session.insert("message_id", msg_id).await {
+        Ok(_) => {}
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())).into_response(),
+    }
+
+    // transmit new message event
+    let new_msg_event = Event::MessageNew(new_msg.clone());
+    if let Err(e) = event_tx.send(new_msg_event) {
+        eprintln!("Error broadcasting new message: {e}")
+    }
+    (StatusCode::OK, Json(new_msg)).into_response()
 }
 
-async fn key_handler(ws: WebSocketUpgrade, state: State<AppState>) -> Response {
-    ws.on_upgrade(|ws| ws_events_handler(ws, state))
+async fn msg_get_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let msgs = state.messages.clone();
+    let Ok(msgs) = msgs.try_lock() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json("Could not access messages, try again."),
+        )
+            .into_response();
+    };
+
+    (StatusCode::OK, Json(&*msgs)).into_response()
 }
 
 /************\
 * Event Code *
 \************/
 
-/// The base event sent and received from websockets
 #[derive(Serialize, Deserialize, Debug, Clone)]
-struct Event {
-    t: EventType,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-enum EventType {
-    MessageNew,
-    MessageUpdate,
+#[serde(tag = "event", content = "data")]
+enum Event {
+    MessageNew(Message),
     MessageEnd,
 }
 
-/// A completed Message.
-/// The text contains all keystrokes, including backspace.
-/// Timings will be added
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct Message {
-    id: i64,
-    text: String,
-}
-
-/// A message update
-/// This is how the client sends keystroke(s) to the server
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct MessageUpdate {
-    message_id: i64,
-    keystrokes: Vec<KeyStroke>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct KeyStroke {
-    pub key: char,
-    /* time: std::time::Duration, */  //this will get added in when DB functionality is added
+async fn events_handler(ws: WebSocketUpgrade, state: State<AppState>) -> Response {
+    ws.on_upgrade(|ws| ws_events_handler(ws, state))
 }
 
 async fn ws_events_handler(mut ws: WebSocket, State(state): State<AppState>) {
-    ws.send(ws::Message::Ping("A".into())).await.unwrap();
+    let mut event_rx = state.event_tx.subscribe();
+    loop {
+        match event_rx.recv().await {
+            Ok(event) => {
+                let json = serde_json::to_string(&event).unwrap();
+                let ws_msg = ws::Message::Text(json.into());
+                if let Err(e) = ws.send(ws_msg).await {
+                    eprintln!("Event send error: {e}");
+                }
+            }
+            Err(e) => eprintln!("Event receive error: {e}"),
+        }
+    }
 }
 
 /**********************************\
 * Client <-> Server Keystroke Code *
 \**********************************/
 // TODO: See this webside for how to split the websocket send/recv
-// https://github.com/tokio-rs/axum/blob/main/examples/websockets/src/main.rs
+// https://github.com/tokio-rs/aaxum/blob/main/examples/websockets/src/main.rs
 
-/// capture keystrokes
-/// send message updates down the tokio tx
-async fn ws_c2s_task(mut ws: WebSocket, State(state): State<AppState>) {
-    let tx = state.ws_tx.clone();
-    while let Some(Ok(msg)) = ws.recv().await {
-        if let ws::Message::Text(msg) = msg {
-            let keystroke: KeyStroke =
-                serde_json::from_str(msg.as_str()).unwrap_or(KeyStroke { key: '\0' });
-            println!("{:?}", keystroke);
-
-            let keyvec = Vec::<KeyStroke>::from([keystroke]);
-            let msg_update = MessageUpdate {
-                message_id: 0,
-                keystrokes: keyvec,
-            };
-            let _ = tx.send(msg_update).map_err(|e| {
-                eprintln!("Internal transmission failed: {e}");
-            });
-        }
-    }
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct Keystroke {
+    message_id: i64,
+    key: char,
+    /* time: std::time::Duration, */  //this will get added in when DB functionality is added
 }
 
-/***********************\
-* Client -> Server Code *
-\***********************/
+async fn key_handler(ws: WebSocketUpgrade, state: State<AppState>, session: Session) -> Response {
+    if session.id().is_none() {
+        return (StatusCode::BAD_REQUEST, "Session id is not set!").into_response();
+    }
+    ws.on_upgrade(|ws| ws_key_handler(ws, state, session))
+}
 
-/// broadcast keystokes
-/// receive message update from the tokio tx
-async fn ws_s2c_handler(mut ws: WebSocket, State(state): State<AppState>) {
-    let mut rx = state.ws_tx.subscribe();
-    loop {
-        let msg_update = rx
-            .recv()
-            .await
-            .map_err(|e| {
-                eprintln!("Receive error: {e}");
-            })
-            .unwrap();
-        let json = serde_json::to_string(&msg_update).unwrap();
-        let ws_msg = ws::Message::Text(json.into());
-        ws.send(ws_msg).await.unwrap();
+/// Split websocket into send/recv and propogate to separate client -> server and server -> client
+/// functions
+async fn ws_key_handler(ws: WebSocket, state: State<AppState>, session: Session) {
+    let _ = state.key_tx.clone();
+    let _ = ws;
+    let (mut ws_tx, mut ws_rx) = ws.split();
+    let mut s2c_task = tokio::spawn(ws_s2c_task(ws_tx, state.clone(), session.clone()));
+    // TODO: look at this clone
+    // this clone could break the
+    // handlers and there is
+    // probably another way to do it
+    let mut c2s_task = tokio::spawn(ws_c2s_task(ws_rx, state, session));
+    tokio::select! {
+        s2c_result = (&mut s2c_task) => {
+            match s2c_result {
+                Ok(_) => {},
+                Err(e) => eprintln!("Error sending keystrokes: {e}")
+            }
+            c2s_task.abort();
+        },
+        c2s_result = (&mut c2s_task) => {
+            match c2s_result {
+                Ok(_) => {},
+                Err(e) => eprintln!("Error receiving keystrokes {e}")
+            }
+            s2c_task.abort();
+        }
+    }
+
+    /***********************\
+    * Server -> Client Code *
+    \***********************/
+
+    /// broadcast keystokes
+    /// receive message update from the tokio tx
+    async fn ws_s2c_task(
+        mut ws_tx: SplitSink<WebSocket, ws::Message>,
+        State(state): State<AppState>,
+        session: Session,
+    ) {
+        let mut rx = state.key_tx.subscribe();
+        loop {
+            let msg_update = rx
+                .recv()
+                .await
+                .map_err(|e| {
+                    eprintln!("Receive error: {e}");
+                })
+                .unwrap();
+            let json = serde_json::to_string(&msg_update).unwrap();
+            let ws_msg = ws::Message::Binary(json.into());
+            ws_tx.send(ws_msg).await.unwrap();
+        }
+    }
+
+    /***********************\
+    * Client -> Server Code *
+    \***********************/
+
+    /// capture keystrokes
+    /// send message updates down the tokio tx
+    async fn ws_c2s_task(
+        mut ws_rx: SplitStream<WebSocket>,
+        State(state): State<AppState>,
+        session: Session,
+    ) {
+        let key_tx = state.key_tx.clone();
+        while let Some(Ok(msg)) = ws_rx.next().await {
+            if let ws::Message::Binary(body) = msg {
+                if body.len() == 4 {
+                    let key_bytes: [u8; 4] = body[0..4].try_into().unwrap();
+                    let key_int: u32 = u32::from_le_bytes(key_bytes);
+                    if let Some(key) = char::from_u32(key_int) {
+                        let session_id = session.id().expect(
+                            "Session is not set before client broadcasted keystrokes to server",
+                        );
+                        let message_id: i64;
+                        {
+                            let session_to_message_ref = state.session_to_message.clone();
+                            let session_to_message = (*session_to_message_ref).read().await;
+                            message_id = *session_to_message.get(&session_id).expect("Client broadcasted keystrokes to server without having a message created.");
+                        }
+
+                        let keystroke = Keystroke { message_id, key };
+                        if let Err(e) = key_tx.send(keystroke) {
+                            eprintln!("Keystroke send error: {e}");
+                        }
+                        println!("Key received: {:?}", key);
+                    } else {
+                        eprintln!("Bad key received: {:?}", body);
+                    }
+                } else {
+                    eprintln!("Invalid character length: {:?}", body);
+                }
+            }
+        }
     }
 }
