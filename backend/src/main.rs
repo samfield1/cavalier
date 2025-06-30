@@ -18,9 +18,15 @@
 
 //! Axum backend for cavalier
 //!
+//! This backend provides three endpoints:
+//! 1. `/api/ws/events/`: A websocket for sending `Event`s (server -> client)
+//! 2. `/api/ws/key`: A websocket for sending keystrokes as binary arrays (server <-> client)
+//! 3. `/apt/msg/*`: JSON APIs for getting message data (server -> client)
 //!
+// TODO: instead of using expect() / panicing during websocket threads, end the loop and send
+// ws::Message::Close to terminate the connection gracefully. Also program behavior for when
+// ws::Message::Close is received from the socket to exit gracefully.
 
-#![allow(unused_imports)] // remove when development is futher along
 use axum::{
     Json, Router,
     extract::{
@@ -33,7 +39,7 @@ use axum::{
 };
 use bytes::{BufMut, BytesMut};
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 // use serde_json::Result;
 use futures_util::{
     sink::SinkExt,
@@ -42,22 +48,44 @@ use futures_util::{
 use std::collections::HashMap;
 use tokio::sync::{
     RwLock,
-    broadcast::{self, Receiver, Sender},
+    broadcast::{self, Sender},
 };
-use tokio::time::Duration;
-use tower_sessions::{Expiry, MemoryStore, Session, SessionManagerLayer, session};
+use tower_sessions::{Expiry, MemoryStore, Session, SessionManagerLayer, session::Id as SessionId};
 
 /***********************\
 * Global Structs, Enums *
 \***********************/
+// TODO: refactor: move these into shared crate
 
 /// A completed Message.
+///
 /// The text contains all keystrokes, including backspace.
 /// Timings will be added
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Message {
     id: u32,
     text: String,
+}
+
+/// A keystroke
+///
+/// Associates key char with message_id, timing, any other info.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct Keystroke {
+    message_id: u32,
+    key: char,
+    /* time: std::time::Duration, */  //this will get added in when DB functionality is added
+}
+
+/// An event
+///
+/// Communicates from the server to the client that a new message has been created, a message is
+/// over, there is a new user, etc any live updates the client could want
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "event", content = "data")]
+enum Event {
+    MessageNew(Message),
+    MessageEnd,
 }
 
 /**********************\
@@ -68,8 +96,8 @@ struct Message {
 struct AppState {
     key_tx: Sender<Keystroke>,
     event_tx: Sender<Event>,
-    messages: Arc<Mutex<Vec<Message>>>,
-    session_to_message: Arc<RwLock<HashMap<session::Id, u32>>>,
+    messages: Arc<RwLock<Vec<Message>>>,
+    session_to_message: Arc<RwLock<HashMap<SessionId, u32>>>,
     /* db connection */
 }
 
@@ -84,7 +112,6 @@ async fn main() {
         .await
         .expect(format!("Could not bind to {BASE_URL}").as_str());
     println!("Listening on {:?}", listener.local_addr().unwrap());
-    println!("Waiting for connection");
 
     let (key_tx, _) = broadcast::channel(10_000); // Keystroke tx
     let (event_tx, _) = broadcast::channel(10_000); // event tx
@@ -94,9 +121,9 @@ async fn main() {
         text: String::from("Default starting message. Sneed's Feed and Seed."),
     }]);
     msgvec.reserve(10);
-    let messages = Arc::new(Mutex::new(msgvec));
+    let messages = Arc::new(RwLock::new(msgvec));
 
-    let session_to_message_map = HashMap::<session::Id, u32>::new();
+    let session_to_message_map = HashMap::<SessionId, u32>::new();
     let session_to_message = Arc::new(RwLock::new(session_to_message_map));
 
     let state = AppState {
@@ -109,7 +136,8 @@ async fn main() {
     let session_store = MemoryStore::default();
     let session_layer = SessionManagerLayer::new(session_store)
         .with_secure(false)
-        .with_expiry(Expiry::OnInactivity(time::Duration::seconds(10)));
+        .with_expiry(Expiry::OnInactivity(time::Duration::minutes(10)))
+        .with_path("/api");
 
     let router = Router::new()
         .route("/api/ws/events", any(events_handler)) // client <-> server event communication
@@ -132,13 +160,14 @@ async fn get_test_handler(_: State<AppState>) -> axum::response::Html<&'static s
 
 #[axum::debug_handler]
 async fn msg_new_handler(State(state): State<AppState>, session: Session) -> impl IntoResponse {
+    session.insert("preserve", true).await.unwrap(); // ensures session
     let msgs_ref = state.messages.clone();
     let event_tx = state.event_tx.clone();
     let msg_id: u32;
     let new_msg: Message;
     // add to global state vec
     // inside scope to drop guard at end
-    if let Ok(mut msgs) = msgs_ref.try_lock() {
+    if let Ok(mut msgs) = msgs_ref.try_write() {
         msg_id = u32::try_from(msgs.len() + 1).expect("Message id u32 overflow!");
         new_msg = Message {
             id: msg_id,
@@ -153,6 +182,7 @@ async fn msg_new_handler(State(state): State<AppState>, session: Session) -> imp
             .into_response();
     };
 
+    // TODO: the session check must go above the new message allocation
     // add to global session RwLock
     match session.id() {
         Some(session_id) => {
@@ -161,6 +191,7 @@ async fn msg_new_handler(State(state): State<AppState>, session: Session) -> imp
             session_to_message.insert(session_id, msg_id);
         }
         None => {
+            eprintln!("Session: {:?}", session);
             return (
                 StatusCode::BAD_REQUEST,
                 Json("Session must be set to make a new message"),
@@ -186,7 +217,7 @@ async fn msg_new_handler(State(state): State<AppState>, session: Session) -> imp
 
 async fn msg_get_handler(State(state): State<AppState>) -> impl IntoResponse {
     let msgs = state.messages.clone();
-    let Ok(msgs) = msgs.try_lock() else {
+    let Ok(msgs) = msgs.try_read() else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json("Could not access messages, try again."),
@@ -201,17 +232,11 @@ async fn msg_get_handler(State(state): State<AppState>) -> impl IntoResponse {
 * Event Code *
 \************/
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(tag = "event", content = "data")]
-enum Event {
-    MessageNew(Message),
-    MessageEnd,
-}
-
 async fn events_handler(ws: WebSocketUpgrade, state: State<AppState>) -> Response {
     ws.on_upgrade(|ws| ws_events_handler(ws, state))
 }
 
+/// Send updates to the client live as `Event` jsons
 async fn ws_events_handler(mut ws: WebSocket, State(state): State<AppState>) {
     let mut event_rx = state.event_tx.subscribe();
     loop {
@@ -232,14 +257,8 @@ async fn ws_events_handler(mut ws: WebSocket, State(state): State<AppState>) {
 * Client <-> Server Keystroke Code *
 \**********************************/
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct Keystroke {
-    message_id: u32,
-    key: char,
-    /* time: std::time::Duration, */  //this will get added in when DB functionality is added
-}
-
 async fn key_handler(ws: WebSocketUpgrade, state: State<AppState>, session: Session) -> Response {
+    session.insert("preserve", true).await.unwrap(); // ensures session
     if session.id().is_none() {
         return (StatusCode::BAD_REQUEST, "Session id is not set!").into_response();
     }
@@ -339,7 +358,7 @@ async fn ws_key_handler(ws: WebSocket, state: State<AppState>, session: Session)
                     let key_int: u32 = u32::from_le_bytes(key_bytes);
                     if let Some(key) = char::from_u32(key_int) {
                         let session_id = session.id().expect(
-                            "Session is not set before client broadcasted keystrokes to server",
+                            "Session was not set before client broadcasted keystrokes to server",
                         );
                         let message_id: u32;
                         {
@@ -352,6 +371,16 @@ async fn ws_key_handler(ws: WebSocket, state: State<AppState>, session: Session)
                         if let Err(e) = key_tx.send(keystroke) {
                             eprintln!("Keystroke send error: {e}");
                         }
+                        {
+                            let messages_ref = state.messages.clone();
+                            let mut messages = (*messages_ref).write().await;
+                            match messages.get_mut(message_id as usize) {
+                                Some(message) => message.text.push(key),
+                                None => eprintln!(
+                                    "Message id {message_id} not found in global messages vec"
+                                ),
+                            }
+                        }
                         println!("Key received: {:?}", key);
                     } else {
                         eprintln!("Bad key received: {:?}", body);
@@ -359,6 +388,8 @@ async fn ws_key_handler(ws: WebSocket, state: State<AppState>, session: Session)
                 } else {
                     eprintln!("Invalid character length: {:?}", body);
                 }
+            } else {
+                eprintln!("Invalid ws key message received: {:?}", msg);
             }
         }
     }

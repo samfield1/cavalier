@@ -1,12 +1,35 @@
 [package]
 name = "cavalier-frontend"
+description = "extralive chat"
 version = "0.1.0"
 edition = "2024"
+license = "AGPL-3.0-only"
+homepage = "cavalier.samfield.net"
 
 [dependencies]
 console_error_panic_hook = "0.1.7"
 wasm-bindgen = { version = "0.2.100" }
-web-sys = { version = "0.3.77", features = ["Window", "Document", "HtmlElement", "Text"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+futures-util = "0.3.31"
+time = "0.3.41"
+js-sys = "0.3.77"
 
 [profile.release]
 opt-level = "s"
+
+[dependencies.web-sys]
+version = "0.3.77"
+features = [
+  "BinaryType",
+  "Blob",
+  "ErrorEvent",
+  "FileReader",
+  "MessageEvent",
+  "ProgressEvent",
+  "WebSocket",
+  "Window",
+  "Document",
+  "HtmlElement",
+  "Text",
+]
