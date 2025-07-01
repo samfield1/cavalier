@@ -19,15 +19,14 @@
 // TODO: restrict cursor so that keystroke inputs don't desync
 // For example, <Ctrl+A><Backspace> deletes the message but doesn't reflect.
 // Adding chars in the middle of a message doesn't reflect properly.
-#![allow(unused_imports)] // remove when development is further along
 use js_sys::{ArrayBuffer, JsString, Uint8Array};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 use web_sys::{
-    ErrorEvent, MessageEvent, Request, RequestCredentials, RequestInit, RequestMode, Response,
-    WebSocket, window,
+    MessageEvent, Request, RequestCredentials, RequestInit, RequestMode, Response, WebSocket,
+    window,
 };
 
 macro_rules! console_log {
@@ -200,6 +199,54 @@ pub async fn run() -> Result<(), JsValue> {
         .add_event_listener_with_callback("input", on_keystroke.as_ref().unchecked_ref())?;
     on_keystroke.forget();
 
+    let sendbtn_current_message_ref = current_message.clone();
+    let on_sendbtn_click = Closure::<dyn FnMut(_)>::new(move |_event: web_sys::Event| {
+        let sendbtn_current_message_ref = sendbtn_current_message_ref.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let new_msg: Message = new_msg().await.expect("Creating new message failed");
+            let mut cur_msg = sendbtn_current_message_ref
+                .lock()
+                .expect("Couldn't set initial message");
+            (*cur_msg) = Some(new_msg);
+            let input: web_sys::HtmlInputElement = window()
+                .unwrap()
+                .document()
+                .unwrap()
+                .get_element_by_id("message-input")
+                .unwrap()
+                .dyn_into::<web_sys::HtmlInputElement>()
+                .unwrap();
+            input.set_value("");
+        })
+    });
+
+    document
+        .get_element_by_id("send-button")
+        .expect("Send button does not exist")
+        .add_event_listener_with_callback("click", on_sendbtn_click.as_ref().unchecked_ref())?;
+    on_sendbtn_click.forget();
+    let on_input_keydown =
+        Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |event: web_sys::KeyboardEvent| {
+            if event.key() == "Enter" {
+                let submit_btn = window()
+                    .unwrap()
+                    .document()
+                    .unwrap()
+                    .get_element_by_id("send-button")
+                    .expect("Submit button does not exist");
+
+                submit_btn
+                    .dyn_ref::<web_sys::HtmlElement>()
+                    .unwrap()
+                    .click();
+            }
+        });
+    document
+        .get_element_by_id("message-input")
+        .expect("Message input does not exist")
+        .add_event_listener_with_callback("keydown", on_input_keydown.as_ref().unchecked_ref())?;
+    on_input_keydown.forget();
+
     Ok(())
 }
 
@@ -210,7 +257,10 @@ fn update_message_div(message_id: u32, key: char) {
 
     let ui_message_ele = document
         .get_element_by_id(&format!("message-body-{}", message_id.to_string()))
-        .expect("Could not get message div to update it");
+        .expect(&format!(
+            "Could not get #message-body-{} to update it",
+            message_id
+        ));
     let mut text = ui_message_ele.inner_html();
     if key == '\x08' {
         text.pop().unwrap();

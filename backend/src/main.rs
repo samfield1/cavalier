@@ -46,12 +46,9 @@ use futures_util::{
     stream::{SplitSink, SplitStream, StreamExt},
 };
 use std::collections::HashMap;
-use tokio::{
-    sync::{
-        RwLock,
-        broadcast::{self, Sender},
-    },
-    time::{Duration, interval},
+use tokio::sync::{
+    RwLock,
+    broadcast::{self, Sender},
 };
 use tower_sessions::{Expiry, MemoryStore, Session, SessionManagerLayer, session::Id as SessionId};
 
@@ -256,23 +253,24 @@ async fn ws_events_handler(ws: WebSocket, State(state): State<AppState>) {
 
     // Always read from the socket to keep it alive
     tokio::spawn(async move {
+        // TODO: think about updating both websocket handlers to get close. However, recognize the
+        // limited utility, because the main thread's send loop has no way to access this
+        // information without an Arc<Mutex<>>
         while let Some(Ok(msg)) = receiver.next().await {
             match msg {
                 ws::Message::Close(_) => {
                     dbg!("/api/ws/events/: received Close");
                     break;
                 }
-                msg => {}
+                _msg => {}
             }
         }
     });
 
     // Send events
     while let Ok(event) = event_rx.recv().await {
-        dbg!("Sending event");
         let json = serde_json::to_string(&event).unwrap();
         let ws_msg = ws::Message::Text(json.into());
-        dbg!("Sending event now!");
         if let Err(e) = sender.send(ws_msg).await {
             eprintln!("Event send error: {e}");
             break;
@@ -324,7 +322,7 @@ async fn ws_key_handler(ws: WebSocket, state: State<AppState>, session: Session)
     async fn ws_s2c_task(
         mut ws_tx: SplitSink<WebSocket, ws::Message>,
         State(state): State<AppState>,
-        session: Session,
+        _session: Session,
     ) {
         let mut rx = state.key_tx.subscribe();
         loop {
@@ -381,7 +379,6 @@ async fn ws_key_handler(ws: WebSocket, state: State<AppState>, session: Session)
     ) {
         let key_tx = state.key_tx.clone();
         while let Some(Ok(msg)) = ws_rx.next().await {
-            dbg!(&msg);
             if let ws::Message::Binary(body) = msg {
                 if body.len() == 4 {
                     // interpret message
@@ -413,7 +410,6 @@ async fn ws_key_handler(ws: WebSocket, state: State<AppState>, session: Session)
                                 ),
                             }
                         }
-                        println!("Key received: {:?}", key);
                     } else {
                         eprintln!("Bad key received: {:?}", body);
                     }

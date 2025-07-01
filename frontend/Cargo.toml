@@ -28,6 +28,7 @@ features = [
     "Headers",
     "HtmlElement",
     "HtmlInputElement",
+    "KeyboardEvent",
     "Location",
     "MessageEvent",
     "ProgressEvent",
