@@ -171,7 +171,7 @@ async fn msg_new_handler(State(state): State<AppState>, session: Session) -> imp
     // add to global state vec
     // inside scope to drop guard at end
     if let Ok(mut msgs) = msgs_ref.try_write() {
-        msg_id = u32::try_from(msgs.len() + 1).expect("Message id u32 overflow!");
+        msg_id = u32::try_from(msgs.len()).expect("Message id u32 overflow!");
         new_msg = Message {
             id: msg_id,
             text: String::new(),
@@ -207,7 +207,7 @@ async fn msg_new_handler(State(state): State<AppState>, session: Session) -> imp
     // the global app state struct
     // match session.insert("message_id", msg_id).await {
     //     Ok(_) => {}
-    //     Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string())).into_response(),
+    //     Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(e.to_string() at)).into_response(),
     // }
 
     // transmit new message event
@@ -241,36 +241,41 @@ async fn events_handler(ws: WebSocketUpgrade, state: State<AppState>) -> Respons
 }
 
 /// Send updates to the client live as `Event` jsons
-async fn ws_events_handler(mut ws: WebSocket, State(state): State<AppState>) {
+async fn ws_events_handler(ws: WebSocket, State(state): State<AppState>) {
     let mut event_rx = state.event_tx.subscribe();
-    let mut ping_interval = interval(Duration::from_secs(5));
 
-    loop {
-        tokio::select! {
-            _ = ping_interval.tick() => {
-                let bytes = vec![0xFE];
-                let ping_msg = ws::Message::Ping(bytes.into());
-                if let Err(e) = ws.send(ping_msg).await {
-                    eprintln!("Send error when pinging: {e}");
+    let (mut sender, mut receiver) = ws.split();
+
+    let event = serde_json::to_string(&Event::MessageNew(Message {
+        id: 8u32,
+        text: String::new(),
+    }))
+    .unwrap();
+    let event_msg = ws::Message::Text(event.into());
+    sender.send(event_msg).await.expect("Failed to send");
+
+    // Always read from the socket to keep it alive
+    tokio::spawn(async move {
+        while let Some(Ok(msg)) = receiver.next().await {
+            match msg {
+                ws::Message::Close(_) => {
+                    dbg!("/api/ws/events/: received Close");
                     break;
                 }
+                msg => {}
             }
-            event = event_rx.recv() => {
-                match event {
-                    Ok(event) => {
-                        let json = serde_json::to_string(&event).unwrap();
-                        let ws_msg = ws::Message::Text(json.into());
-                        if let Err(e) = ws.send(ws_msg).await {
-                            eprintln!("Event send error: {e}");
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Event receive error: {e}");
-                        break;
-                    }
-                }
-            }
+        }
+    });
+
+    // Send events
+    while let Ok(event) = event_rx.recv().await {
+        dbg!("Sending event");
+        let json = serde_json::to_string(&event).unwrap();
+        let ws_msg = ws::Message::Text(json.into());
+        dbg!("Sending event now!");
+        if let Err(e) = sender.send(ws_msg).await {
+            eprintln!("Event send error: {e}");
+            break;
         }
     }
 }
@@ -326,30 +331,34 @@ async fn ws_key_handler(ws: WebSocket, state: State<AppState>, session: Session)
             match rx.recv().await {
                 Ok(keystroke) => {
                     // don't broadcast if the keystroke came from this session
-                    let self_msg: bool;
-                    {
-                        let session_id = session
-                            .id()
-                            .expect("ws key_tx task started without session id");
-                        let session_to_message_ref = state.session_to_message.clone();
-                        let session_to_message = (*session_to_message_ref).read().await;
-                        self_msg = match session_to_message.get(&session_id) {
-                            Some(message_id) => *message_id == keystroke.message_id,
-                            None => false,
-                        }
-                    }
-                    if !self_msg {
-                        // build buffer.
-                        // first 4 bytes = little endian char/key
-                        // last 4 bytes = little endian message id
-                        let mut buffer = BytesMut::with_capacity(8);
-                        buffer.put_u32_le(keystroke.key as u32);
-                        buffer.put_u32_le(keystroke.message_id);
-                        let msg_bytes = buffer.freeze();
-                        let ws_msg = ws::Message::Binary(msg_bytes);
-                        if let Err(e) = ws_tx.send(ws_msg).await {
-                            eprintln!("Error sending ws_tx: {e}");
-                        }
+                    // TODO: reevaluate if this is useful. It is turned off now for two reasons:
+                    // 1. easier to debug
+                    // 2. The client only echoing the character when the server responds gives the
+                    //    user hangup when lagging instead of false feedback
+                    // let self_msg: bool;
+                    // {
+                    //     let session_id = session
+                    //         .id()
+                    //         .expect("ws key_tx task started without session id");
+                    //     let session_to_message_ref = state.session_to_message.clone();
+                    //     let session_to_message = (*session_to_message_ref).read().await;
+                    //     self_msg = match session_to_message.get(&session_id) {
+                    //         Some(message_id) => *message_id == keystroke.message_id,
+                    //         None => false,
+                    //     }
+                    //     // then only broadcast if self_msg == false
+                    // }
+
+                    // build buffer.
+                    // first 4 bytes = little endian char/key
+                    // last 4 bytes = little endian message id
+                    let mut buffer = BytesMut::with_capacity(8);
+                    buffer.put_u32_le(keystroke.key as u32);
+                    buffer.put_u32_le(keystroke.message_id);
+                    let msg_bytes = buffer.freeze();
+                    let ws_msg = ws::Message::Binary(msg_bytes);
+                    if let Err(e) = ws_tx.send(ws_msg).await {
+                        eprintln!("Error sending ws_tx: {e}");
                     }
                 }
                 Err(e) => {
@@ -372,6 +381,7 @@ async fn ws_key_handler(ws: WebSocket, state: State<AppState>, session: Session)
     ) {
         let key_tx = state.key_tx.clone();
         while let Some(Ok(msg)) = ws_rx.next().await {
+            dbg!(&msg);
             if let ws::Message::Binary(body) = msg {
                 if body.len() == 4 {
                     // interpret message

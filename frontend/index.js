@@ -17,7 +17,6 @@
 \**************************************************************************/
 
 // It's over for jannyscript 👹👹👹
-return;
 /*************************************/
  /* <!-- keystroke handler --> */ 
 /*************************************/
@@ -97,7 +96,7 @@ let sendMessage = () => {
 /* <!-- event handling code --> */
 /********************************/
 
-const ws_events = new WebSocket(`${uri_base}/api/ws/events`);
+const ws_events = new WebSocket(`ws://localhost:8080/api/ws/events`);
 ws_events.onopen = (event) => {
     console.log("Events WebSocket Connected");
 }
