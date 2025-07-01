@@ -46,9 +46,12 @@ use futures_util::{
     stream::{SplitSink, SplitStream, StreamExt},
 };
 use std::collections::HashMap;
-use tokio::sync::{
-    RwLock,
-    broadcast::{self, Sender},
+use tokio::{
+    sync::{
+        RwLock,
+        broadcast::{self, Sender},
+    },
+    time::{Duration, interval},
 };
 use tower_sessions::{Expiry, MemoryStore, Session, SessionManagerLayer, session::Id as SessionId};
 
@@ -135,7 +138,7 @@ async fn main() {
 
     let session_store = MemoryStore::default();
     let session_layer = SessionManagerLayer::new(session_store)
-        .with_secure(false)
+        .with_secure(true)
         .with_expiry(Expiry::OnInactivity(time::Duration::minutes(10)))
         .with_path("/api");
 
@@ -215,7 +218,8 @@ async fn msg_new_handler(State(state): State<AppState>, session: Session) -> imp
     (StatusCode::OK, Json(new_msg)).into_response()
 }
 
-async fn msg_get_handler(State(state): State<AppState>) -> impl IntoResponse {
+async fn msg_get_handler(State(state): State<AppState>, session: Session) -> impl IntoResponse {
+    session.insert("preserve", true).await.unwrap();
     let msgs = state.messages.clone();
     let Ok(msgs) = msgs.try_read() else {
         return (
@@ -239,16 +243,34 @@ async fn events_handler(ws: WebSocketUpgrade, state: State<AppState>) -> Respons
 /// Send updates to the client live as `Event` jsons
 async fn ws_events_handler(mut ws: WebSocket, State(state): State<AppState>) {
     let mut event_rx = state.event_tx.subscribe();
+    let mut ping_interval = interval(Duration::from_secs(5));
+
     loop {
-        match event_rx.recv().await {
-            Ok(event) => {
-                let json = serde_json::to_string(&event).unwrap();
-                let ws_msg = ws::Message::Text(json.into());
-                if let Err(e) = ws.send(ws_msg).await {
-                    eprintln!("Event send error: {e}");
+        tokio::select! {
+            _ = ping_interval.tick() => {
+                let bytes = vec![0xFE];
+                let ping_msg = ws::Message::Ping(bytes.into());
+                if let Err(e) = ws.send(ping_msg).await {
+                    eprintln!("Send error when pinging: {e}");
+                    break;
                 }
             }
-            Err(e) => eprintln!("Event receive error: {e}"),
+            event = event_rx.recv() => {
+                match event {
+                    Ok(event) => {
+                        let json = serde_json::to_string(&event).unwrap();
+                        let ws_msg = ws::Message::Text(json.into());
+                        if let Err(e) = ws.send(ws_msg).await {
+                            eprintln!("Event send error: {e}");
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Event receive error: {e}");
+                        break;
+                    }
+                }
+            }
         }
     }
 }

@@ -5,31 +5,40 @@ version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-only"
 homepage = "cavalier.samfield.net"
+categories = ["wasm", "web-programming::websocket", "web-programming::http-client"]
 
 [dependencies]
 console_error_panic_hook = "0.1.7"
-wasm-bindgen = { version = "0.2.100" }
+futures-util = "0.3.31"
+js-sys = "0.3.77"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
-futures-util = "0.3.31"
 time = "0.3.41"
-js-sys = "0.3.77"
-
-[profile.release]
-opt-level = "s"
+wasm-bindgen = { version = "0.2.100" }
+wasm-bindgen-futures = "0.4.50"
 
 [dependencies.web-sys]
 version = "0.3.77"
 features = [
-  "BinaryType",
-  "Blob",
-  "ErrorEvent",
-  "FileReader",
-  "MessageEvent",
-  "ProgressEvent",
-  "WebSocket",
-  "Window",
-  "Document",
-  "HtmlElement",
-  "Text",
+    "BinaryType",
+    "Blob",
+    "Document",
+    "ErrorEvent",
+    "FileReader",
+    "Headers",
+    "HtmlElement",
+    "Location",
+    "MessageEvent",
+    "ProgressEvent",
+    "Request",
+    "RequestCredentials",
+    "RequestInit",
+    "RequestMode",
+    "Response",
+    "Text",
+    "WebSocket",
+    "Window",
 ]
+
+[profile.release]
+opt-level = "s"

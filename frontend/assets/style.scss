@@ -57,8 +57,14 @@ h1 {
   gap: 1rem;
 }
 
+@media (max-width: 600px) {
+  .chat-container {
+    width: 100%;
+  }
+}
+
 /* Messages container */
-.message-container {
+.messages-container {
   background-color: #e4e5e9;
   border: 2px solid #c1c3ca;
   border-radius: 12px;
@@ -74,7 +80,7 @@ h1 {
   outline: none;
 }
 
-.message-container:focus {
+.messages-container:focus {
   border-color: #4a90e2;
   box-shadow: 0 0 8px rgba(74, 144, 226, 0.6);
 }
@@ -89,6 +95,16 @@ h1 {
 .message-leader {
   display: inline-block;
   width: 40px;
+}
+
+.message-sender {
+  font-family: inherit;
+  color: #5784b1;
+  margin-right: 15px;
+}
+
+.message-body {
+  font-family: inherit;
 }
 
 /* Input area wrapper */

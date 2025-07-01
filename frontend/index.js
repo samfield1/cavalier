@@ -16,7 +16,8 @@
 * along with this program.  If not, see <https://www.gnu.org/licenses/>.   *
 \**************************************************************************/
 
-
+// It's over for jannyscript 👹👹👹
+return;
 /*************************************/
  /* <!-- keystroke handler --> */ 
 /*************************************/
@@ -25,7 +26,6 @@ const isLocalhost = hostname.includes("localhost") || hostname === '127.0.0.1';
 const protocol = (isLocalhost) ? "ws" : "wss";
 const port = (isLocalhost) ? "3000" : "80";
 const uri_base = `${protocol}://${hostname}:${port}`
-
 
 const ws_key = new WebSocket(`${uri_base}/api/ws/key`); 
 

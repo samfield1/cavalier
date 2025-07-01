@@ -22,18 +22,15 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Cavalier</title>
   <link data-trunk rel="sass" data-inline href="assets/style.scss" />
-  <script data-trunk src="index.js" defer></script>
+    <!--<script data-trunk src="index.js" defer></script>-->
 </head>
 <body>
   <h1>Cavalier Chat</h1>
   <div class="chat-container">
-    <div id="message-container" class="message-container" tabindex="0">
-      <div class="message"><span class="message-leader"></span>&lt;Anon&gt; Sneed's Feed and Seed</div>
-      <div class="message"><span class="message-leader"></span>&lt;Anon&gt; Chuck's Feed and Seed</div>
-      <div class="message"><span class="message-leader"></span>&lt;Anon&gt; Wrapping message wrapping message wrapping message wrapping message wrapping message wrapping message wrapping message wrapping message</div>
-    </div>
+    <div id="messages-container" class="messages-container" tabindex="0"></div>
     <div class="input-area">
       <input type="text" id="message-input" class="message-input" placeholder="" autocomplete="off" />
       <button id="send-button" class="send-button" onclick="sendMessage()">Send</button>
