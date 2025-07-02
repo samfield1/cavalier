@@ -26,5 +26,5 @@ Production builds of cavalier are available with the [frontend](ghcr.io/samfield
 This state of this app is a functional prototype, or proof of concept. It has only the most basic features to be functional and it has barely been tested. The next step in the development of this project is refactoring the monolithic `main.rs` files from the backend and frontend into legible, consistent, and organized components. Each of them are littered with `TODO: ` comments on what must be done next.
 
 ### License
-Cavalier is provided under the GNU Affero General Public License 3. See [LICENSE.md](/LICENSE.md) for more details
+Cavalier is provided under the GNU Affero General Public License version 3. See [LICENSE.md](/LICENSE.md) for more details
 
