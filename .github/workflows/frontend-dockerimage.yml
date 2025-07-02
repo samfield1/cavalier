@@ -1,4 +1,4 @@
-name: Frontend dockerimage
+name: Frontend Dockerimage
 
 # This workflow runs when any of the following occur:
 # - A push is made to a branch called `main`
@@ -14,7 +14,6 @@ on:
 env:
   IMAGE_NAME: cavalier-frontend
 jobs:
-  # This pushes the image to GitHub Packages.
   push:
     runs-on: ubuntu-latest
     permissions:
