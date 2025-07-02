@@ -27,6 +27,18 @@
 // ws::Message::Close to terminate the connection gracefully. Also program behavior for when
 // ws::Message::Close is received from the socket to exit gracefully.
 
+// TODO: refactor application
+// Ideas: since there is a global state, all routes accessing that state can go in their own
+// location. Since I use tokio::broadcast for nice encapsulated communication, almost every handler
+// and component can be out of scope from one another. Therefore, the best way to break this app
+// down is by functionality. The websocket handlers go on their own, the message JSON apis go on
+// their own, the future DB code goes on its own, and the future account system and message
+// deleting/moderating goes all on its own.
+//  However, one massive consideration is the TIMING code. I want each message to have timing
+// information stored, which will enable playback of messages. This code will change the Message
+// struct, and it will affect the websocket handlers, and database. Otherwise, it could just be
+// fine.
+
 use axum::{
     Json, Router,
     extract::{
@@ -118,7 +130,9 @@ async fn main() {
 
     let mut msgvec = Vec::<Message>::from([Message {
         id: 0,
-        text: String::from("Default starting message. Sneed's Feed and Seed."),
+        text: String::from(
+            "Hello! Welcome to Cavalier Extralive Chat. As you type your message, it will reflect to your friends in real time. No prose, just rash and cavalier messages! All messages are anonymous and stored in RAM, thus they are securely deleted when the server restarts. This project is provided to you under the GNU AGPL3. To see the source code of this app, visit https://github.com/samfield1/cavalier/ 🫠 你们玩儿",
+        ),
     }]);
     msgvec.reserve(10);
     let messages = Arc::new(RwLock::new(msgvec));
@@ -144,13 +158,14 @@ async fn main() {
         .route("/api/ws/key", any(key_handler)) // client <-> server keystrokes communication
         .route("/api/msg/new", any(msg_new_handler)) // json API: writing new message
         .route("/api/msg/get", get(msg_get_handler)) // json API: get existing messages
-        .route("/api/get-test", get(get_test_handler)) // test page to check if axum is working
+        .route("/api/session/new", any(session_new_handler)) // associate user with new session
+        .route("/api/test", any(test_handler)) // test if axum is running
         .layer(session_layer)
         .with_state(state);
     axum::serve(listener, router).await.unwrap()
 }
 
-async fn get_test_handler(_: State<AppState>) -> axum::response::Html<&'static str> {
+async fn test_handler(_: State<AppState>) -> axum::response::Html<&'static str> {
     axum::response::Html("<h1 style=\"text-align: center;\">GET test</h1>")
 }
 
@@ -243,17 +258,9 @@ async fn ws_events_handler(ws: WebSocket, State(state): State<AppState>) {
 
     let (mut sender, mut receiver) = ws.split();
 
-    let event = serde_json::to_string(&Event::MessageNew(Message {
-        id: 8u32,
-        text: String::new(),
-    }))
-    .unwrap();
-    let event_msg = ws::Message::Text(event.into());
-    sender.send(event_msg).await.expect("Failed to send");
-
     // Always read from the socket to keep it alive
     tokio::spawn(async move {
-        // TODO: think about updating both websocket handlers to get close. However, recognize the
+        // TODO: think about updating both websocket handlers to deal with close and pingpong. However, recognize the
         // limited utility, because the main thread's send loop has no way to access this
         // information without an Arc<Mutex<>>
         while let Some(Ok(msg)) = receiver.next().await {
@@ -421,4 +428,16 @@ async fn ws_key_handler(ws: WebSocket, state: State<AppState>, session: Session)
             }
         }
     }
+}
+
+async fn session_new_handler(state: State<AppState>, session: Session) -> impl IntoResponse {
+    state
+        .session_to_message
+        .write()
+        .await
+        .remove(&session.id().unwrap());
+    session.delete().await.ok();
+
+    session.insert("preserve", true).await.ok();
+    StatusCode::OK
 }
