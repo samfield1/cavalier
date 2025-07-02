@@ -1,15 +1,12 @@
 name: Backend Dockerimage
 
 # This workflow runs when any of the following occur:
-# - A push is made to a branch called `main` or `seed`
-# - A tag starting with "v" is created
+# - A push is made to branch called `main`
 # - A pull request is created or updated
 on:
   push:
     branches:
       - main
-    tags:
-      - v*
   pull_request:
 env:
   IMAGE_NAME: cavalier-backend
