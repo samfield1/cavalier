@@ -160,6 +160,12 @@ pub async fn run() -> Result<(), JsValue> {
     ws_events.set_onopen(Some(ws_events_onopen.as_ref().unchecked_ref()));
     ws_events_onopen.forget();
 
+    let ws_events_onclose = Closure::<dyn FnMut(_)>::new(move |_e: web_sys::Event| {
+        window().unwrap().location().reload().unwrap()
+    });
+    ws_events.set_onclose(Some(ws_events_onclose.as_ref().unchecked_ref()));
+    ws_events_onclose.forget();
+
     // Add onmessage function to websocket to listen for keystrokes and add them to the right
     // message.
     let ws_key_url = format!("{}//{}:{}{}", &ws_protocol, &hostname, &port, "/api/ws/key");
@@ -181,6 +187,12 @@ pub async fn run() -> Result<(), JsValue> {
     });
     ws_key.set_onmessage(Some(ws_key_onmessage.as_ref().unchecked_ref()));
     ws_key_onmessage.forget();
+
+    let ws_key_onclose = Closure::<dyn FnMut(_)>::new(move |_e: web_sys::Event| {
+        window().unwrap().location().reload().unwrap()
+    });
+    ws_key.set_onclose(Some(ws_key_onclose.as_ref().unchecked_ref()));
+    ws_key_onclose.forget();
 
     // Add event listener to listen for keystrokes and broadcast them to the server
     let ws_key_send = ws_key.clone();

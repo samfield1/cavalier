@@ -49,7 +49,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{any, get},
 };
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 // use serde_json::Result;
@@ -58,9 +58,12 @@ use futures_util::{
     stream::{SplitSink, SplitStream, StreamExt},
 };
 use std::collections::HashMap;
-use tokio::sync::{
-    RwLock,
-    broadcast::{self, Sender},
+use tokio::{
+    sync::{
+        Mutex, RwLock,
+        broadcast::{self, Sender},
+    },
+    time::{Duration, interval},
 };
 use tower_sessions::{Expiry, MemoryStore, Session, SessionManagerLayer, session::Id as SessionId};
 
@@ -131,7 +134,7 @@ async fn main() {
     let mut msgvec = Vec::<Message>::from([Message {
         id: 0,
         text: String::from(
-            "Hello! Welcome to Cavalier Extralive Chat. As you type your message, it will reflect to your friends in real time. No prose, just rash and cavalier messages! All messages are anonymous and stored in RAM, thus they are securely deleted when the server restarts. This project is provided to you under the GNU AGPL3. To see the source code of this app, visit https://github.com/samfield1/cavalier/ 🫠 你们玩儿",
+            "Hello! Welcome to Cavalier Extralive Chat. As you type your message, it will reflect to your friends in real time. No prose, just rash and cavalier messages! All messages are anonymous and stored in RAM, thus they are securely deleted when the server restarts. This project is provided to you under the GNU AGPLv3. To see the source code of this app, visit https://github.com/samfield1/cavalier/ 🫠 你们随便玩儿",
         ),
     }]);
     msgvec.reserve(10);
@@ -256,7 +259,7 @@ async fn events_handler(ws: WebSocketUpgrade, state: State<AppState>) -> Respons
 async fn ws_events_handler(ws: WebSocket, State(state): State<AppState>) {
     let mut event_rx = state.event_tx.subscribe();
 
-    let (mut sender, mut receiver) = ws.split();
+    let (sender, mut receiver) = ws.split();
 
     // Always read from the socket to keep it alive
     tokio::spawn(async move {
@@ -269,16 +272,38 @@ async fn ws_events_handler(ws: WebSocket, State(state): State<AppState>) {
                     dbg!("/api/ws/events/: received Close");
                     break;
                 }
+                ws::Message::Pong(_) => {
+                    dbg!("/api/ws/events/: received Pong");
+                }
                 _msg => {}
+            }
+        }
+    });
+    let shared_sender = Arc::new(Mutex::new(sender));
+
+    let ping_sender = shared_sender.clone();
+    tokio::spawn(async move {
+        let mut interval = interval(Duration::from_secs(10));
+        loop {
+            interval.tick().await;
+            if let Err(e) = ping_sender
+                .lock()
+                .await
+                .send(ws::Message::Ping(Bytes::from_static(&[8u8])))
+                .await
+            {
+                eprintln!("Event ping error: {e}");
+                break;
             }
         }
     });
 
     // Send events
+    let event_sender = shared_sender.clone();
     while let Ok(event) = event_rx.recv().await {
         let json = serde_json::to_string(&event).unwrap();
         let ws_msg = ws::Message::Text(json.into());
-        if let Err(e) = sender.send(ws_msg).await {
+        if let Err(e) = event_sender.lock().await.send(ws_msg).await {
             eprintln!("Event send error: {e}");
             break;
         }
@@ -326,12 +351,33 @@ async fn ws_key_handler(ws: WebSocket, state: State<AppState>, session: Session)
 
     /// receive keystrokes from the key_rx
     /// send keystrokes to all clients but the originator
+    /// Also ping tje client every 10 seconds
     async fn ws_s2c_task(
-        mut ws_tx: SplitSink<WebSocket, ws::Message>,
+        ws_tx: SplitSink<WebSocket, ws::Message>,
         State(state): State<AppState>,
         _session: Session,
     ) {
         let mut rx = state.key_tx.subscribe();
+        let shared_ws_tx = Arc::new(Mutex::new(ws_tx));
+
+        let ping_ws_tx = shared_ws_tx.clone();
+        tokio::spawn(async move {
+            let mut interval = interval(Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+                if let Err(e) = ping_ws_tx
+                    .lock()
+                    .await
+                    .send(ws::Message::Ping(Bytes::from_static(&[8u8])))
+                    .await
+                {
+                    eprintln!("Event ping error: {e}");
+                    break;
+                }
+            }
+        });
+
+        let key_ws_tx = shared_ws_tx.clone();
         loop {
             match rx.recv().await {
                 Ok(keystroke) => {
@@ -362,7 +408,7 @@ async fn ws_key_handler(ws: WebSocket, state: State<AppState>, session: Session)
                     buffer.put_u32_le(keystroke.message_id);
                     let msg_bytes = buffer.freeze();
                     let ws_msg = ws::Message::Binary(msg_bytes);
-                    if let Err(e) = ws_tx.send(ws_msg).await {
+                    if let Err(e) = key_ws_tx.lock().await.send(ws_msg).await {
                         eprintln!("Error sending ws_tx: {e}");
                     }
                 }
@@ -386,8 +432,11 @@ async fn ws_key_handler(ws: WebSocket, state: State<AppState>, session: Session)
     ) {
         let key_tx = state.key_tx.clone();
         while let Some(Ok(msg)) = ws_rx.next().await {
-            if let ws::Message::Binary(body) = msg {
-                if body.len() == 4 {
+            match msg {
+                ws::Message::Binary(body) if body.len() != 4 => {
+                    eprintln!("Invalid character length: {:?}", body);
+                }
+                ws::Message::Binary(body) => {
                     // interpret message
                     // 4 bytes long, little endian keystroke/char
                     let key_bytes: [u8; 4] = body[0..4].try_into().unwrap();
@@ -420,11 +469,13 @@ async fn ws_key_handler(ws: WebSocket, state: State<AppState>, session: Session)
                     } else {
                         eprintln!("Bad key received: {:?}", body);
                     }
-                } else {
-                    eprintln!("Invalid character length: {:?}", body);
                 }
-            } else {
-                eprintln!("Invalid ws key message received: {:?}", msg);
+                ws::Message::Pong(_) => {
+                    dbg!("/api/ws/keys/: Pong received");
+                }
+                _ => {
+                    eprintln!("Invalid ws key message received: {:?}", msg);
+                }
             }
         }
     }
