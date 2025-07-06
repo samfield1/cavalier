@@ -161,7 +161,7 @@ pub async fn run() -> Result<(), JsValue> {
     ws_events_onopen.forget();
 
     let ws_events_onclose = Closure::<dyn FnMut(_)>::new(move |_e: web_sys::Event| {
-        window().unwrap().location().reload().unwrap()
+        //window().unwrap().location().reload().unwrap()
     });
     ws_events.set_onclose(Some(ws_events_onclose.as_ref().unchecked_ref()));
     ws_events_onclose.forget();
@@ -189,7 +189,7 @@ pub async fn run() -> Result<(), JsValue> {
     ws_key_onmessage.forget();
 
     let ws_key_onclose = Closure::<dyn FnMut(_)>::new(move |_e: web_sys::Event| {
-        window().unwrap().location().reload().unwrap()
+        //window().unwrap().location().reload().unwrap()
     });
     ws_key.set_onclose(Some(ws_key_onclose.as_ref().unchecked_ref()));
     ws_key_onclose.forget();
@@ -344,20 +344,22 @@ pub async fn run() -> Result<(), JsValue> {
 
     // Set actual viewport height. This is for the CSS, and also so that phones don't spaz out when
     // the keyboard is opened.
+    fn set_real_vh_inner() -> Option<f64> {
+        let real_vh = window()?.visual_viewport()?.height().floor();
+        window()?
+            .document()?
+            .document_element()?
+            .dyn_into::<HtmlElement>()
+            .ok()?
+            .style()
+            .set_property("--real-vh", &format!("{}px", real_vh))
+            .ok()?;
+        Some(real_vh)
+    }
+
     // TODO: make this less sinful. guh... look at that..
     let set_real_vh = Closure::<dyn FnMut(_)>::new(|_event: web_sys::Event| {
-        let vh = window().unwrap().inner_height().unwrap().as_f64().unwrap();
-        window()
-            .unwrap()
-            .document()
-            .unwrap()
-            .document_element()
-            .unwrap()
-            .dyn_into::<HtmlElement>()
-            .unwrap()
-            .style()
-            .set_property("--real-vh", &format!("{}px", vh))
-            .unwrap();
+        set_real_vh_inner();
     });
     window()
         .unwrap()
@@ -366,19 +368,18 @@ pub async fn run() -> Result<(), JsValue> {
         "orientationchange",
         set_real_vh.as_ref().unchecked_ref(),
     )?;
-    set_real_vh.forget();
-    let vh = window().unwrap().inner_height().unwrap().as_f64().unwrap();
     window()
         .unwrap()
-        .document()
+        .add_event_listener_with_callback("scroll", set_real_vh.as_ref().unchecked_ref())?;
+    window()
         .unwrap()
-        .document_element()
+        .add_event_listener_with_callback("focusin", set_real_vh.as_ref().unchecked_ref())?;
+    window()
         .unwrap()
-        .dyn_into::<HtmlElement>()
-        .unwrap()
-        .style()
-        .set_property("--real-vh", &format!("{}px", vh))
-        .unwrap();
+        .add_event_listener_with_callback("focusout", set_real_vh.as_ref().unchecked_ref())?;
+
+    set_real_vh.forget();
+    set_real_vh_inner();
 
     Ok(())
 }

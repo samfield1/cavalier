@@ -42,6 +42,7 @@ features = [
     "RequestMode",
     "Response",
     "Text",
+    "VisualViewport",
     "WebSocket",
     "Window",
 ]

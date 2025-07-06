@@ -30,12 +30,18 @@ body {
   color: #2c3e50;
   line-height: 1.5;
   padding: 1rem;
-  min-height: var(--real-vh, 1vh);
   overscroll-behavior-y: contain;
   touch-action: manipulation;
   display: flex;
   flex-direction: column;
   align-items: center;
+}
+
+body, html {
+  overflow: hidden;
+  position: fixed;
+  width: 100%;
+  height: var(--real-vh, 100vh);
 }
 
 /* Header */
@@ -59,19 +65,13 @@ h1 {
   gap: 1rem;
 }
 
-@media (max-width: 600px) {
-  .chat-container {
-    width: 100%;
-  }
-}
-
 /* Messages container */
 .messages-container {
   background-color: #e4e5e9;
   border: 2px solid #c1c3ca;
   border-radius: 12px;
   padding: 1rem 1.5rem;
-  height: calc(var(--real-vh, 1vh) - 200px);
+  height: calc(var(--real-vh, 80vh) - 200px);
   overflow-y: auto;
   box-shadow: inset 0 0 8px #d0d3db;
   font-family: Consolas, Menlo, Monaco, "Courier New", monospace;
@@ -84,6 +84,7 @@ h1 {
   overflow-x: hidden;
   scrollbar-width: thin;
   scrollbar-color: #97c7ff91 #e4e5e9;
+    -webkit-overflow-scrolling: touch;
 }
 
 .messages-container:focus {
@@ -181,5 +182,62 @@ h1 {
   background: linear-gradient(135deg, #357abd, #2a5d8f);
   box-shadow: 0 6px 12px rgba(40, 75, 131, 0.5);
   outline: none;
+}
+
+@media (max-width: 576px) {
+  body {
+    padding: 0.5rem;
+    font-size: 0.9rem;
+  }
+
+  h1 {
+    font-size: 1.75rem;
+    margin-bottom: 0.5rem;
+    letter-spacing: 0.03em;
+  }
+
+  .chat-container {
+    width: 100%;
+    gap: 0.75rem;
+  }
+
+  .messages-container {
+    padding: 0.75rem 1rem;
+    font-size: 0.65rem;
+    border-radius: 10px;
+    height: calc(var(--real-vh, 1vh) - 160px);
+    box-shadow: inset 0 0 6px #cdd3db;
+  }
+
+  .input-area {
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .message-input {
+    font-size: .65rem;
+    padding: 0.6em 0.9em;
+    border-radius: 6px;
+    margin-left: 0;
+    box-shadow: inset 0 1px 2px #bbb;
+    pointer-events: auto;
+  }
+
+  .send-button {
+    width: 60%;
+    margin: 0 auto;
+    font-size: .65rem;
+    padding: 0.9em;
+    border-radius: 6px;
+    box-shadow: 0 3px 6px rgba(54, 107, 179, 0.25);
+  }
+
+  .message-sender {
+    margin-right: 0.5rem;
+  }
+
+  .message {
+    margin-bottom: 0.2rem;
+  }
 }
 
